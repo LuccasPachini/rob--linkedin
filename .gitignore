@@ -1,35 +1,35 @@
 # Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
+#node_modules/
+#npm-debug.log*
+#yarn-debug.log*
+#pnpm-debug.log*
 
 # Credenciais/variáveis
-.env
-.env.*.local
+#.env
+#.env.*.local
 
 # Logs e temporários
-logs/
-*.log
-*.out
-*.err
-tmp/
-cache/
+#logs/
+#*.log
+#*.out
+#*.err
+#tmp/
+#cache/
 
 # Puppeteer / depuração
-debug-*.png
-screenshots/
+#debug-*.png
+#screenshots/
 
 # Build/coverage (se usar)
-dist/
-build/
-coverage/
+#dist/
+#build/
+#coverage/
 
 # VSCode (ignore tudo, exceto configs que você queira versionar)
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
+#.vscode/*
+#!.vscode/settings.json
+#!.vscode/extensions.json
 
 # SO
-.DS_Store
-Thumbs.db
+#.DS_Store
+#Thumbs.db
