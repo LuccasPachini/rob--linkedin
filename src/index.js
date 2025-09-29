@@ -21,7 +21,7 @@ const MAX_REQUESTS = Number.isFinite(Number(MAX_REQUESTS_ENV)) ? Number(MAX_REQU
 
 // Tempos agressivos no modo rápido
 const WAIT_SUCCESS_MODAL_MS = FAST ? 1200 : 8000;   // aguardo modal "Proposta enviada"
-const WAIT_DECLINE_MODAL_MS = FAST ? 800  : 7000;   // aguardo modal "Recusar" (pedido inicial era 7s)
+const WAIT_DECLINE_MODAL_MS = FAST ? 800  : 7000;   // aguardo modal "Recusar"
 const BETWEEN_ITEMS_BASE_MS = FAST ? 900  : 9000;   // intervalo entre itens
 const BETWEEN_ITEMS_SPREAD_MS = FAST ? 400 : 4000;
 
@@ -357,9 +357,8 @@ function buildMessage(details, decision) {
   return tpl.length > 1499 ? tpl.slice(0, 1499) : tpl;
 }
 
-/* ======== preencher rápido sem keyboard.insertText (DOM) ======== */
+/* ======== preencher rápido sem insertText (DOM) ======== */
 async function fillEditableFast(page, handle, message) {
-  // Detecta se é textarea ou contenteditable
   const tagName = await page.evaluate(el => el.tagName, handle).catch(()=>null);
   const isTextarea = String(tagName || '').toLowerCase() === 'textarea';
 
@@ -376,21 +375,87 @@ async function fillEditableFast(page, handle, message) {
   // contenteditable
   await page.evaluate((el, msg) => {
     el.focus();
-    // limpa
     el.innerHTML = '';
-    // insere de forma "editável"
     const sel = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(el);
     sel.removeAllRanges();
     sel.addRange(range);
-    // execCommand ainda funciona para contenteditable
     document.execCommand('insertText', false, msg);
     el.dispatchEvent(new InputEvent('input', { bubbles: true }));
   }, handle, message);
 }
 
-/* ================== UI: enviar/recusar ================== */
+/* ======== localiza editor no modal (textarea/contenteditable) ======== */
+async function findEditableInDialog(page, maxMs = 6000) {
+  const deadline = Date.now() + maxMs;
+
+  while (Date.now() < deadline) {
+    const dlg = await page.$('div[role="dialog"]');
+    if (!dlg) { await sleep(80); continue; }
+
+    // Caso o campo fique atrás de "Adicionar mensagem"
+    await clickByTextInsideDialog(page, [
+      'Adicionar mensagem','Adicionar uma mensagem','Adicionar nota',
+      'Add message','Add a message','Add note'
+    ], 400).catch(()=>{});
+
+    const selectors = [
+      'textarea',
+      '[contenteditable="true"]',
+      'div[contenteditable]:not([contenteditable="false"])',
+      '[role="textbox"]',
+      'div.msg-form__contenteditable'
+    ];
+    for (const sel of selectors) {
+      const nodes = await dlg.$$(sel);
+      for (const h of nodes) {
+        const visible = await h.evaluate(el => {
+          const s = window.getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          const vis = s && s.visibility !== 'hidden' && s.display !== 'none';
+          return vis && r && r.width > 2 && r.height > 2;
+        }).catch(()=>false);
+        if (visible) {
+          await h.evaluate(el => el.scrollIntoView({ block: 'center' })).catch(()=>{});
+          return h;
+        }
+      }
+    }
+    await sleep(100);
+  }
+  return null;
+}
+
+/* ======== localizar composer do chat (mini-messenger) ======== */
+async function findChatComposer(page, maxMs = 7000) {
+  const deadline = Date.now() + maxMs;
+
+  while (Date.now() < deadline) {
+    const bubbles = await page.$$('.msg-overlay-conversation-bubble');
+    for (const b of bubbles) {
+      const visible = await b.evaluate(el => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 100 && r.height > 80;
+      }).catch(()=>false);
+      if (!visible) continue;
+
+      const editor = await b.$('textarea, .msg-form__contenteditable, [contenteditable="true"], [role="textbox"]');
+      if (editor) {
+        const eVis = await editor.evaluate(el => {
+          const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+          return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 2 && r.height > 2;
+        }).catch(()=>false);
+        if (eVis) return { bubble: b, composer: editor };
+      }
+    }
+    await sleep(120);
+  }
+  return null;
+}
+
+/* ================== UI: enviar/recusar + mensagem no chat ================== */
 async function openSendProposalModal(page) {
   await page.bringToFront().catch(()=>{});
   const clicked = await clickByTextLoose(page, ['Enviar proposta', 'Send proposal'], 3500);
@@ -399,33 +464,89 @@ async function openSendProposalModal(page) {
   return true;
 }
 
-async function waitAndClosePostSendModal(page, delayMs = WAIT_SUCCESS_MODAL_MS) {
-  await sleep(delayMs);
+/** Após enviar proposta:
+ *  - aguarda modal de sucesso
+ *  - clica "Enviar mensagem"
+ *  - envia o mesmo texto no chat
+ *  - fecha o chat
+ */
+async function handleSuccessModalAction(page, message) {
+  // espera rápido pelo modal de sucesso
+  await sleep(WAIT_SUCCESS_MODAL_MS);
+
   const dlg = await page.$('div[role="dialog"]');
-  if (!dlg) return;
-  const txt = ((await (await dlg.getProperty('innerText')).jsonValue()) || '').toLowerCase();
-  const isSuccess = txt.includes('proposta enviada') || txt.includes('sua proposta foi enviada') ||
-                    txt.includes('proposal sent')   || txt.includes('your proposal has been sent');
-  if (!isSuccess) return;
-  const clickedNo = await clickByTextInsideDialog(page, ['Não', 'No'], 1200).catch(()=>false);
-  if (!clickedNo) {
+  if (!dlg) return; // às vezes não aparece — ok, segue
+
+  // tenta clicar em "Enviar mensagem"
+  let clicked = await clickByTextInsideDialog(page, ['Enviar mensagem', 'Send message'], 1800).catch(()=>false);
+  if (!clicked) {
+    const btns = await dlg.$$('button');
+    for (const b of btns) {
+      const t = ((await (await b.getProperty('innerText')).jsonValue()) || '').toLowerCase();
+      if (t.includes('enviar mensagem') || t.includes('send message')) { await b.click().catch(()=>{}); clicked = true; break; }
+    }
+  }
+
+  if (!clicked) {
+    // plano B: fecha modal e segue (para não travar o fluxo)
     const closeBtn = await dlg.$('button[aria-label*="Fechar"], button[aria-label*="Close"], .artdeco-modal__dismiss');
     if (closeBtn) await closeBtn.click().catch(()=>{});
+    return;
   }
-  await page.waitForFunction(() => !document.querySelector('div[role="dialog"]'), { timeout: 6000 }).catch(()=>{});
+
+  // aguarda abrir o chat (mini messenger)
+  const chat = await findChatComposer(page, 7000);
+  if (!chat) return;
+
+  // preenche e envia
+  await chat.composer.click({ clickCount: 1 }).catch(()=>{});
+  await fillEditableFast(page, chat.composer, message);
+
+  const sendBtn = await chat.bubble.$('button[aria-label*="Enviar"], button[aria-label*="Send"], .msg-form__send-button');
+  if (sendBtn) await sendBtn.click().catch(()=>{});
+  else {
+    await chat.composer.focus().catch(()=>{});
+    await page.keyboard.press('Enter').catch(()=>{});
+  }
+
+  // fecha o chat
+  const closeChat = await chat.bubble.$('button[aria-label*="Fechar"], button[aria-label*="Close"], .msg-overlay-bubble-header__control button');
+  if (closeChat) await closeChat.click().catch(()=>{});
+
+  // fecha o modal se ainda estiver na tela
+  const dlg2 = await page.$('div[role="dialog"]');
+  if (dlg2) {
+    const n = await clickByTextInsideDialog(page, ['Não', 'No'], 600).catch(()=>false);
+    if (!n) {
+      const c = await dlg2.$('button[aria-label*="Fechar"], button[aria-label*="Close"], .artdeco-modal__dismiss');
+      if (c) await c.click().catch(()=>{});
+    }
+    await page.waitForFunction(() => !document.querySelector('div[role="dialog"]'), { timeout: 3000 }).catch(()=>{});
+  }
+
+  console.log('💬 Mensagem enviada no chat e chat fechado.');
 }
 
+// envia a proposta (preenche modal + clica enviar) e trata pós-envio (chat)
 async function typeMessageAndSend(page, message) {
   const dialog = await page.$('div[role="dialog"]');
   if (!dialog) throw new Error('Modal de proposta não abriu.');
-  const input = await dialog.$('textarea, [contenteditable="true"]');
-  if (!input) throw new Error('Textarea da proposta não encontrado.');
 
-  // limpa seleção e COLA via DOM (super rápido)
+  const input = await findEditableInDialog(page, 6000);
+  if (!input) {
+    try {
+      const snap = `screenshots/no-textarea-${Date.now()}.png`;
+      await page.screenshot({ path: snap, fullPage: true });
+      const dump = await dialog.evaluate(el => (el.innerText || '').slice(0, 2000)).catch(()=> '');
+      console.log('⚠️ Dump modal (parcial):\n', dump);
+      console.log('📸 Screenshot salvo em:', snap);
+    } catch {}
+    throw new Error('Textarea da proposta não encontrado.');
+  }
+
   await input.click({ clickCount: 1 }).catch(()=>{});
   await fillEditableFast(page, input, message);
 
-  // clica Enviar
   const buttons = await dialog.$$('button');
   let sendBtn = null;
   for (const b of buttons) {
@@ -435,8 +556,11 @@ async function typeMessageAndSend(page, message) {
   if (!sendBtn) throw new Error('Botão Enviar/Send não encontrado.');
   await sendBtn.click().catch(()=>{});
 
-  await page.waitForFunction(() => !document.querySelector('div[role="dialog"]'), { timeout: 5000 }).catch(()=>{});
-  await waitAndClosePostSendModal(page);
+  // espera o modal de proposta sumir
+  await page.waitForFunction(() => !document.querySelector('div[role="dialog"] .artdeco-modal'), { timeout: 5000 }).catch(()=>{});
+
+  // agora trata o modal "Proposta enviada" e envia mensagem no chat
+  await handleSuccessModalAction(page, message);
 }
 
 async function clickDecline(page) {
@@ -464,14 +588,13 @@ async function main() {
   const browser = await puppeteer.launch({
     protocolTimeout: PROTOCOL_TIMEOUT,
     headless: HEADLESS !== 'false',
-    slowMo: HEADLESS === 'false' ? (FAST ? 5 : 50) : 0, // animações quase zero no modo rápido
+    slowMo: HEADLESS === 'false' ? (FAST ? 5 : 50) : 0,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-gpu',
       '--disable-dev-shm-usage',
       '--window-size=1366,900',
-      // evita throttling quando em background
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
       '--disable-backgrounding-occluded-windows',
@@ -527,8 +650,8 @@ async function main() {
         } else {
           const ok = await openSendProposalModal(page);
           if (!ok) throw new Error('Não abriu modal de proposta.');
-          await typeMessageAndSend(page, message);  // preenche via DOM (turbo)
-          console.log('📨 Proposta enviada.');
+          await typeMessageAndSend(page, message);  // envia proposta + manda DM no chat
+          console.log('📨 Proposta enviada + DM enviada.');
         }
       } catch (e) {
         console.log('❌ Falha ao enviar/recusar:', e.message);
