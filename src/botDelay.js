@@ -25,7 +25,7 @@ const WAIT_DECLINE_MODAL_MS = FAST ? 800  : 7000;   // aguardo modal "Recusar"
 const BETWEEN_ITEMS_BASE_MS = FAST ? 900  : 9000;   // intervalo entre itens
 const BETWEEN_ITEMS_SPREAD_MS = FAST ? 400 : 4000;
 
-// Delays específicos que você pediu (4 passos de 6s)
+// Delays específicos (4 passos de 6s)
 const D_APAGAR   = 6000; // depois de abrir a mensagem, antes de apagar
 const D_COLAR    = 6000; // depois de apagar, antes de colar
 const D_DESTRAVO = 6000; // depois de colar, antes de clicar no container
@@ -381,7 +381,7 @@ async function getBubbleElements(page) {
   if (!bubble) return null;
 
   const contentEditable = await bubble.$('.msg-form__contenteditable[contenteditable="true"][role="textbox"]');
-  const unlockContainer = await bubble.$('.msg-form__msg-content-container'); // seletor que você forneceu
+  const unlockContainer = await bubble.$('.msg-form__msg-content-container'); // seletor informado
   const sendButton = await bubble.$('.msg-form__send-button.artdeco-button');
 
   return { bubble, contentEditable, unlockContainer, sendButton };
@@ -396,16 +396,12 @@ async function openSendProposalModal(page) {
   return true;
 }
 
-/* ================== Fluxo pós-proposta (com 4 delays de 6s) ================== */
+/* ================== Fluxo pós-proposta (delays 6s) ================== */
 async function handleSuccessModalAction(page, message) {
-  // Aguarda aparecer o modal de sucesso rapidamente
   await sleep(WAIT_SUCCESS_MODAL_MS);
 
   const dlg = await page.$('div[role="dialog"]');
-  if (!dlg) {
-    console.log('ℹ️ Modal de sucesso não apareceu; pulando envio de mensagem.');
-    return;
-  }
+  if (!dlg) { console.log('ℹ️ Modal de sucesso não apareceu.'); return; }
 
   // Clica "Enviar mensagem"
   let clicked = await clickByTextInsideDialog(page, ['Enviar mensagem','Send message'], 2200).catch(()=>false);
@@ -417,72 +413,69 @@ async function handleSuccessModalAction(page, message) {
     }
   }
   if (!clicked) {
-    console.log('⚠️ Não achei o botão "Enviar mensagem". Fechando modal e seguindo.');
+    console.log('⚠️ Não achei "Enviar mensagem". Fechando modal e seguindo.');
     const closeBtn = await dlg.$('button[aria-label*="Fechar"], button[aria-label*="Close"], .artdeco-modal__dismiss');
     if (closeBtn) await closeBtn.click().catch(()=>{});
     return;
   }
 
-  // Espera abrir bolha de chat e aplica os 4 delays
+  // Delay 1: apagar
   console.log('⏳ Delay para apagar:', D_APAGAR, 'ms');
   await sleep(D_APAGAR);
 
   const els1 = await getBubbleElements(page);
   if (!els1 || !els1.contentEditable) { console.log('❌ Composer não encontrado.'); return; }
 
-  // APAGA UMA VEZ (hard reset do innerHTML + eventos)
+  // Apaga uma vez
   await els1.contentEditable.evaluate(el => {
     el.focus();
     el.innerHTML = '';
-    const evt = new InputEvent('input', { bubbles: true });
-    el.dispatchEvent(evt);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
   }).catch(()=>{});
   console.log('🧹 Texto padrão apagado.');
 
+  // Delay 2: colar
   console.log('⏳ Delay para colar:', D_COLAR, 'ms');
   await sleep(D_COLAR);
 
-  // COLA o texto da proposta
+  // Cola o texto
   await els1.contentEditable.evaluate((el, msg) => {
     el.focus();
-    // Usar insertText permite que o LinkedIn trate como digitação real
     if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
       document.execCommand('insertText', false, msg);
     } else {
       el.textContent = msg;
     }
-    const evt = new InputEvent('input', { bubbles: true });
-    el.dispatchEvent(evt);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
   }, message).catch(()=>{});
   console.log('📄 Texto colado no composer.');
 
+  // Delay 3: destravar
   console.log('⏳ Delay para destravar (click no container):', D_DESTRAVO, 'ms');
   await sleep(D_DESTRAVO);
 
-  // CLICA NO CONTAINER PARA DESTRAVAR O ENVIAR
   const els2 = await getBubbleElements(page);
   if (els2?.unlockContainer) {
     await els2.unlockContainer.click({ delay: 20 }).catch(()=>{});
     await els2.unlockContainer.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' })).catch(()=>{});
     console.log('🖱️ Clique no container da mensagem (destravar enviar).');
   } else {
-    console.log('⚠️ Container para destravar não encontrado; seguindo assim mesmo.');
+    console.log('⚠️ Container para destravar não encontrado.');
   }
 
+  // Delay 4: enviar
   console.log('⏳ Delay antes de clicar Enviar:', D_ENVIAR, 'ms');
   await sleep(D_ENVIAR);
 
-  // CLICA EM ENVIAR
   const els3 = await getBubbleElements(page);
   if (els3?.sendButton) {
     const disabled = await els3.sendButton.evaluate(el => el.hasAttribute('disabled')).catch(()=>false);
     if (disabled) {
-      console.log('⚠️ Botão Enviar ainda desabilitado; tentando focar editor e gerar input mais uma vez.');
+      console.log('⚠️ Enviar desabilitado; forçando evento de input.');
       if (els3.contentEditable) {
         await els3.contentEditable.evaluate(el => {
           el.focus();
-          const evt = new InputEvent('input', { bubbles: true });
-          el.dispatchEvent(evt);
+          el.dispatchEvent(new InputEvent('input', { bubbles: true }));
         }).catch(()=>{});
         await sleep(400);
       }
@@ -490,22 +483,17 @@ async function handleSuccessModalAction(page, message) {
     await els3.sendButton.click({ delay: 30 }).catch(()=>{});
     console.log('📨 Clique em Enviar executado.');
   } else {
-    console.log('❌ Botão Enviar não encontrado. (Classe esperada: .msg-form__send-button.artdeco-button)');
+    console.log('❌ Botão Enviar não encontrado.');
   }
 
-  // FECHA A BOLHA DE MENSAGEM
+  // Fecha a bolha
   const bubble = els3?.bubble || els2?.bubble || els1?.bubble || await findLatestVisibleBubble(page, 3000);
   if (bubble) {
     const closeBtn = await bubble.$('.msg-overlay-bubble-header__control.artdeco-button--circle');
-    if (closeBtn) {
-      await closeBtn.click().catch(()=>{});
-      console.log('✅ Bolha de mensagem fechada.');
-    } else {
-      console.log('ℹ️ Botão de fechar da bolha não encontrado.');
-    }
+    if (closeBtn) { await closeBtn.click().catch(()=>{}); console.log('✅ Bolha fechada.'); }
   }
 
-  // Fecha o modal de sucesso (se ainda aberto)
+  // Fecha modal remanescente
   const dlg2 = await page.$('div[role="dialog"]');
   if (dlg2) {
     const n = await clickByTextInsideDialog(page, ['Não', 'No'], 600).catch(()=>false);
@@ -519,7 +507,7 @@ async function handleSuccessModalAction(page, message) {
   console.log('💬 Mensagem tratada com delays e bolha fechada.');
 }
 
-/* ================== Envio da proposta (modal) ================== */
+/* ================== Envio da proposta ================== */
 async function findEditableInDialog(page, maxMs = 6000) {
   const deadline = Date.now() + maxMs;
 
@@ -527,7 +515,6 @@ async function findEditableInDialog(page, maxMs = 6000) {
     const dlg = await page.$('div[role="dialog"]');
     if (!dlg) { await sleep(80); continue; }
 
-    // Caso o campo fique atrás de "Adicionar mensagem"
     await clickByTextInsideDialog(page, [
       'Adicionar mensagem','Adicionar uma mensagem','Adicionar nota',
       'Add message','Add a message','Add note'
@@ -574,7 +561,6 @@ async function fillEditableFast(page, handle, message) {
     return;
   }
 
-  // contenteditable
   await page.evaluate((el, msg) => {
     el.focus();
     el.innerHTML = '';
@@ -616,10 +602,8 @@ async function typeMessageAndSend(page, message) {
   if (!sendBtn) throw new Error('Botão Enviar/Send não encontrado.');
   await sendBtn.click().catch(()=>{});
 
-  // espera o modal de proposta sumir
   await page.waitForFunction(() => !document.querySelector('div[role="dialog"] .artdeco-modal'), { timeout: 5000 }).catch(()=>{});
 
-  // agora trata o modal "Proposta enviada" e envia mensagem com delays
   await handleSuccessModalAction(page, message);
 }
 
@@ -674,7 +658,13 @@ async function main() {
       page.click('button[type="submit"]'),
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25_000 })
     ]);
-    console.log('✅ Logado.');
+
+    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    // Aguardar 2FA/código após o login (até 60s)
+    console.log('⏳ Aguardando até 60s para inserir código/2FA do LinkedIn...');
+    await sleep(60_000);
+    console.log('✅ Prosseguindo após janela de 2FA.');
+    // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     // Vai direto para as solicitações (evita entrar no perfil do usuário)
     await openServices(page);
